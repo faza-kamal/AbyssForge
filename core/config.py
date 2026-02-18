@@ -1,6 +1,6 @@
 """
-AbyssForge - Core Configuration
-Tidak boleh import modules, database, dashboard, atau reporting.
+AbyssForge - Scan Configuration
+Dataclass untuk menyimpan semua pengaturan scan.
 """
 
 from dataclasses import dataclass, field
@@ -9,7 +9,7 @@ from typing import List, Optional, Dict
 
 @dataclass
 class ScanConfig:
-    """Konfigurasi global untuk satu sesi scan."""
+    """Konfigurasi untuk satu sesi scan."""
 
     target_url: str
     modules: List[str] = field(default_factory=lambda: ["sqli", "xss", "misconfig", "exposure"])
@@ -21,54 +21,33 @@ class ScanConfig:
     cookie: Optional[str] = None
     extra_headers: Dict[str, str] = field(default_factory=dict)
     verbose: bool = False
-    follow_redirects: bool = True
-    verify_ssl: bool = False
-    max_urls_per_domain: int = 200
-    proxy: Optional[str] = None
 
-    # Severity threshold — temuan di bawah ini tidak dilaporkan
-    min_severity: str = "INFO"
+    # User-Agent default yang menyerupai browser
+    DEFAULT_UA: str = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    )
 
-    def to_dict(self) -> dict:
-        return {
-            "target_url": self.target_url,
-            "modules": ",".join(self.modules),
-            "max_threads": self.max_threads,
-            "timeout": self.timeout,
-            "crawl_depth": self.crawl_depth,
-            "delay": self.delay,
-            "user_agent": self.user_agent or "AbyssForge/1.0",
-            "cookie": self.cookie,
-            "extra_headers": self.extra_headers,
-            "verbose": self.verbose,
-            "follow_redirects": self.follow_redirects,
-            "verify_ssl": self.verify_ssl,
-            "proxy": self.proxy,
+    def get_headers(self) -> Dict[str, str]:
+        """Kembalikan headers HTTP lengkap menyerupai browser sungguhan."""
+        headers = {
+            "User-Agent": self.user_agent or self.DEFAULT_UA,
+            "Accept": (
+                "text/html,application/xhtml+xml,application/xml;"
+                "q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
+            ),
+            "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Cache-Control": "max-age=0",
         }
-
-
-# Konstanta severity level
-SEVERITY_RANK = {
-    "CRITICAL": 5,
-    "HIGH": 4,
-    "MEDIUM": 3,
-    "LOW": 2,
-    "INFO": 1,
-}
-
-# Konstanta CVSS score range → severity mapping
-CVSS_TO_SEVERITY = [
-    (9.0, "CRITICAL"),
-    (7.0, "HIGH"),
-    (4.0, "MEDIUM"),
-    (0.1, "LOW"),
-    (0.0, "INFO"),
-]
-
-
-def cvss_to_severity(cvss_score: float) -> str:
-    """Konversi CVSS score ke label severity."""
-    for threshold, label in CVSS_TO_SEVERITY:
-        if cvss_score >= threshold:
-            return label
-    return "INFO"
+        if self.cookie:
+            headers["Cookie"] = self.cookie
+        headers.update(self.extra_headers)
+        return headers

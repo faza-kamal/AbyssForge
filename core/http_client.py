@@ -1,216 +1,136 @@
 """
 AbyssForge - Async HTTP Client
-Wrapper async di atas aiohttp dengan retry, rate-limiting, dan logging built-in.
-Tidak boleh import modules, database, dashboard, atau reporting.
+Wrapper aiohttp dengan fitur retry, timeout, dan header browser-like.
 """
 
 import asyncio
 import logging
-import time
-from typing import Optional, Dict, Tuple, Any
-from urllib.parse import urlparse
+from dataclasses import dataclass, field
+from typing import Optional, Dict, Any
 
-try:
-    import aiohttp
-    AIOHTTP_AVAILABLE = True
-except ImportError:
-    AIOHTTP_AVAILABLE = False
-
-from core.config import ScanConfig
+import aiohttp
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_UA = (
-    "Mozilla/5.0 (compatible; AbyssForge/1.0; +https://github.com/faza-kamal/AbyssForge)"
-)
 
-
+@dataclass
 class HTTPResponse:
-    """Wrapper response yang konsisten, independen dari library HTTP yang dipakai."""
-
-    def __init__(
-        self,
-        status: int,
-        headers: Dict[str, str],
-        text: str,
-        url: str,
-        elapsed: float,
-        error: Optional[str] = None,
-    ):
-        self.status = status
-        self.headers = headers
-        self.text = text
-        self.url = url
-        self.elapsed = elapsed          # detik
-        self.error = error
-
-    @property
-    def ok(self) -> bool:
-        return self.error is None and 200 <= self.status < 400
+    """Hasil HTTP response yang sudah dinormalisasi."""
+    url: str
+    status: int = 0
+    text: str = ""
+    headers: Dict[str, str] = field(default_factory=dict)
+    error: Optional[str] = None
 
     def header(self, name: str, default: str = "") -> str:
-        """Case-insensitive header lookup."""
+        """Ambil satu header (case-insensitive)."""
         name_lower = name.lower()
         for k, v in self.headers.items():
             if k.lower() == name_lower:
                 return v
         return default
 
-    def contains(self, pattern: str) -> bool:
-        """Periksa apakah body mengandung string tertentu."""
-        return pattern.lower() in self.text.lower()
-
-    def __repr__(self) -> str:
-        return f"<HTTPResponse {self.status} {self.url} [{self.elapsed:.2f}s]>"
-
 
 class AsyncHTTPClient:
     """
     Async HTTP client berbasis aiohttp.
-    Mendukung session reuse, rate limiting, retry, dan custom headers.
+    Fitur:
+    - Header browser-like otomatis
+    - Retry pada error sementara
+    - Timeout per-request
+    - SSL verify opsional
+    - Rate limiting (delay)
     """
 
-    def __init__(self, config: ScanConfig):
-        self.config = config
-        self._session: Optional[Any] = None
-        self._semaphore = asyncio.Semaphore(config.max_threads)
-        self._request_count = 0
-        self._last_request_time: float = 0.0
+    def __init__(
+        self,
+        base_headers: Optional[Dict[str, str]] = None,
+        timeout: int = 10,
+        delay: float = 0.3,
+        max_retries: int = 2,
+        verify_ssl: bool = False,
+    ):
+        self.base_headers = base_headers or {}
+        self.timeout = aiohttp.ClientTimeout(total=timeout)
+        self.delay = delay
+        self.max_retries = max_retries
+        self.verify_ssl = verify_ssl
+        self._session: Optional[aiohttp.ClientSession] = None
 
-        self.base_headers = {
-            "User-Agent": config.user_agent or DEFAULT_UA,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Accept-Encoding": "gzip, deflate",
-            "Connection": "keep-alive",
-        }
-        if config.cookie:
-            self.base_headers["Cookie"] = config.cookie
-        self.base_headers.update(config.extra_headers)
-
-    async def __aenter__(self) -> "AsyncHTTPClient":
-        await self._init_session()
-        return self
-
-    async def __aexit__(self, *_) -> None:
-        await self.close()
-
-    async def _init_session(self) -> None:
-        if not AIOHTTP_AVAILABLE:
-            raise RuntimeError(
-                "aiohttp tidak terinstall. Jalankan: pip install aiohttp"
-            )
-        connector = aiohttp.TCPConnector(
-            ssl=self.config.verify_ssl,
-            limit=self.config.max_threads,
-            limit_per_host=5,
-        )
-        timeout = aiohttp.ClientTimeout(total=self.config.timeout)
-        proxy = self.config.proxy or None
-
+    async def __aenter__(self):
+        connector = aiohttp.TCPConnector(ssl=self.verify_ssl, limit=50)
         self._session = aiohttp.ClientSession(
             connector=connector,
-            timeout=timeout,
+            timeout=self.timeout,
             headers=self.base_headers,
-            trust_env=False,
         )
-        self._proxy = proxy
+        return self
 
-    async def close(self) -> None:
-        if self._session and not self._session.closed:
+    async def __aexit__(self, *args):
+        if self._session:
             await self._session.close()
-            self._session = None
 
-    async def _rate_limit(self) -> None:
-        """Terapkan delay antar request."""
-        if self.config.delay > 0:
-            now = time.monotonic()
-            elapsed = now - self._last_request_time
-            if elapsed < self.config.delay:
-                await asyncio.sleep(self.config.delay - elapsed)
-        self._last_request_time = time.monotonic()
-
-    async def request(
+    async def _request(
         self,
         method: str,
         url: str,
-        *,
-        params: Optional[Dict] = None,
-        data: Optional[Dict] = None,
-        json: Optional[Dict] = None,
-        headers: Optional[Dict] = None,
-        retries: int = 2,
+        **kwargs,
     ) -> HTTPResponse:
-        """Kirim HTTP request dengan retry otomatis."""
-        if self._session is None:
-            await self._init_session()
+        """Eksekusi HTTP request dengan retry."""
+        for attempt in range(self.max_retries + 1):
+            try:
+                if self.delay > 0:
+                    await asyncio.sleep(self.delay)
 
-        merged_headers = {**self.base_headers, **(headers or {})}
-        start = time.monotonic()
+                async with self._session.request(
+                    method,
+                    url,
+                    allow_redirects=True,
+                    **kwargs,
+                ) as resp:
+                    # Baca body dengan limit 5MB untuk keamanan
+                    try:
+                        text = await resp.text(errors="replace")
+                    except Exception:
+                        text = ""
 
-        async with self._semaphore:
-            await self._rate_limit()
-            last_error = None
+                    return HTTPResponse(
+                        url=str(resp.url),
+                        status=resp.status,
+                        text=text,
+                        headers=dict(resp.headers),
+                    )
 
-            for attempt in range(retries + 1):
-                try:
-                    async with self._session.request(
-                        method,
-                        url,
-                        params=params,
-                        data=data,
-                        json=json,
-                        headers=merged_headers,
-                        allow_redirects=self.config.follow_redirects,
-                        proxy=self._proxy if hasattr(self, "_proxy") else None,
-                    ) as resp:
-                        elapsed = time.monotonic() - start
-                        body = await resp.text(errors="replace")
-                        resp_headers = dict(resp.headers)
-                        self._request_count += 1
+            except asyncio.TimeoutError:
+                logger.debug("Timeout pada %s (attempt %d)", url, attempt + 1)
+                if attempt == self.max_retries:
+                    return HTTPResponse(url=url, error="timeout")
 
-                        logger.debug(
-                            "[%s] %s %s → %d (%.2fs)",
-                            attempt, method, url, resp.status, elapsed,
-                        )
+            except aiohttp.ClientConnectorError as e:
+                logger.debug("Koneksi gagal ke %s: %s", url, e)
+                return HTTPResponse(url=url, error=f"connection_error: {e}")
 
-                        return HTTPResponse(
-                            status=resp.status,
-                            headers=resp_headers,
-                            text=body,
-                            url=str(resp.url),
-                            elapsed=elapsed,
-                        )
+            except aiohttp.TooManyRedirects:
+                return HTTPResponse(url=url, error="too_many_redirects")
 
-                except asyncio.TimeoutError:
-                    last_error = "Timeout"
-                    logger.debug("Timeout pada %s (attempt %d)", url, attempt)
-                except Exception as exc:
-                    last_error = str(exc)
-                    logger.debug("Error %s pada %s (attempt %d)", exc, url, attempt)
+            except Exception as e:
+                logger.debug("Error request ke %s: %s", url, e)
+                if attempt == self.max_retries:
+                    return HTTPResponse(url=url, error=str(e))
+                await asyncio.sleep(1)
 
-                if attempt < retries:
-                    await asyncio.sleep(1.0 * (attempt + 1))
+        return HTTPResponse(url=url, error="max_retries_exceeded")
 
-            elapsed = time.monotonic() - start
-            return HTTPResponse(
-                status=0,
-                headers={},
-                text="",
-                url=url,
-                elapsed=elapsed,
-                error=last_error or "Unknown error",
-            )
+    async def get(self, url: str, params: Optional[Dict] = None) -> HTTPResponse:
+        return await self._request("GET", url, params=params)
 
-    async def get(self, url: str, **kwargs) -> HTTPResponse:
-        return await self.request("GET", url, **kwargs)
+    async def post(
+        self,
+        url: str,
+        data: Optional[Dict[str, str]] = None,
+        json: Optional[Dict] = None,
+    ) -> HTTPResponse:
+        return await self._request("POST", url, data=data, json=json)
 
-    async def post(self, url: str, **kwargs) -> HTTPResponse:
-        return await self.request("POST", url, **kwargs)
-
-    async def head(self, url: str, **kwargs) -> HTTPResponse:
-        return await self.request("HEAD", url, **kwargs)
-
-    @property
-    def total_requests(self) -> int:
-        return self._request_count
+    async def head(self, url: str) -> HTTPResponse:
+        return await self._request("HEAD", url)

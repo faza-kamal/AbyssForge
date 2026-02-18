@@ -1,81 +1,101 @@
 """
 AbyssForge - Finding Model
-Model data untuk setiap kerentanan yang ditemukan.
-Tidak boleh import modules, database, dashboard, atau reporting.
+Representasi satu temuan kerentanan.
 """
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional, Dict, Any
-from core.config import cvss_to_severity
+from typing import Optional
+
+
+def _severity_from_cvss(score: float) -> str:
+    if score >= 9.0:
+        return "CRITICAL"
+    if score >= 7.0:
+        return "HIGH"
+    if score >= 4.0:
+        return "MEDIUM"
+    if score > 0.0:
+        return "LOW"
+    return "INFO"
 
 
 @dataclass
 class Finding:
-    """
-    Representasi satu temuan kerentanan.
-    Dirancang agar bisa diserialisasi ke JSON/SQLite.
-    """
+    """Merepresentasikan satu kerentanan yang ditemukan."""
 
-    # Identitas
     title: str
-    vuln_type: str          # sqli, xss, ssrf, xxe, ssti, csrf, misconfig, exposure, etc.
-    severity: str           # CRITICAL / HIGH / MEDIUM / LOW / INFO
-    cvss_score: float       # 0.0 – 10.0
-
-    # Lokasi
+    vuln_type: str
     url: str
+    severity: str
+    cvss_score: float
+    description: str
+    evidence: str
+    payload: str
+    remediation: str
+    references: str
+    module: str
     parameter: Optional[str] = None
     method: str = "GET"
-
-    # Detail
-    description: str = ""
-    evidence: str = ""
-    payload: str = ""
-    request: str = ""
-    response_snippet: str = ""
-
-    # Rekomendasi
-    remediation: str = ""
-    references: str = ""
-
-    # Meta
-    module: str = ""
-    confidence: str = "MEDIUM"  # HIGH / MEDIUM / LOW
+    confidence: str = "MEDIUM"
     false_positive_risk: str = "LOW"
     timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
-    extra: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_cvss(cls, cvss_score: float, **kwargs) -> "Finding":
-        """Buat Finding dengan severity otomatis dari CVSS score."""
-        return cls(severity=cvss_to_severity(cvss_score), cvss_score=cvss_score, **kwargs)
+    def from_cvss(
+        cls,
+        cvss_score: float,
+        title: str,
+        vuln_type: str,
+        url: str,
+        description: str,
+        evidence: str,
+        payload: str,
+        remediation: str,
+        references: str,
+        module: str,
+        parameter: Optional[str] = None,
+        method: str = "GET",
+        confidence: str = "MEDIUM",
+        false_positive_risk: str = "LOW",
+    ) -> "Finding":
+        return cls(
+            title=title,
+            vuln_type=vuln_type,
+            url=url,
+            severity=_severity_from_cvss(cvss_score),
+            cvss_score=cvss_score,
+            description=description,
+            evidence=evidence,
+            payload=payload,
+            remediation=remediation,
+            references=references,
+            module=module,
+            parameter=parameter,
+            method=method,
+            confidence=confidence,
+            false_positive_risk=false_positive_risk,
+        )
 
     def to_dict(self) -> dict:
         return {
             "title": self.title,
             "vuln_type": self.vuln_type,
+            "url": self.url,
             "severity": self.severity,
             "cvss_score": self.cvss_score,
-            "url": self.url,
             "parameter": self.parameter,
             "method": self.method,
             "description": self.description,
             "evidence": self.evidence,
             "payload": self.payload,
-            "request": self.request,
-            "response_snippet": self.response_snippet,
+            "request": "",           # Placeholder untuk future RAW request logging
+            "response_snippet": self.evidence[:500] if self.evidence else "",
             "remediation": self.remediation,
             "references": self.references,
             "module": self.module,
             "confidence": self.confidence,
             "false_positive_risk": self.false_positive_risk,
             "timestamp": self.timestamp,
-            "extra": self.extra,
+            "extra": {},
         }
-
-    def __str__(self) -> str:
-        return (
-            f"[{self.severity}] {self.title} | {self.url}"
-            + (f" | param={self.parameter}" if self.parameter else "")
-        )
