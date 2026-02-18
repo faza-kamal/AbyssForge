@@ -1,1 +1,1 @@
-# AbyssForge Core Package
+"""AbyssForge Core Package"""

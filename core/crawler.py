@@ -1,265 +1,260 @@
 """
-AbyssForge - Web Crawler (Robust)
-Crawl halaman web secara rekursif dengan:
-- Header browser-like (bypass WAF dasar)
-- Penanganan URL relatif & absolut
-- Deteksi form dan input fields
-- Ekstraksi query params
-- Retry & error handling
-- Respect crawl depth
+AbyssForge - Web Crawler
+Async crawler untuk menemukan URL dari sitemap, link HTML, dan form.
+Tidak boleh import modules, database, dashboard, atau reporting.
 """
 
 import asyncio
 import logging
 import re
-from dataclasses import dataclass, field
-from typing import List, Dict, Set, Optional
-from urllib.parse import urlparse, urljoin, parse_qs, urlunparse
+from typing import Set, List, Dict, Optional, Tuple
+from urllib.parse import urljoin, urlparse, parse_qs, urlencode, urlunparse
 
 from core.config import ScanConfig
-from core.http_client import AsyncHTTPClient
+from core.http_client import AsyncHTTPClient, HTTPResponse
 
 logger = logging.getLogger(__name__)
 
-# ─── Regex untuk ekstraksi link ───────────────────────────────────────────────
-
-# Cari semua href="" dan src="" (termasuk link JS sederhana)
-_HREF_RE = re.compile(
-    r'(?:href|src|action)\s*=\s*["\']([^"\'#\s][^"\']*)["\']',
-    re.IGNORECASE,
-)
-
-# Link di dalam JavaScript (window.location, fetch, axios, dll)
-_JS_URL_RE = re.compile(
-    r'(?:fetch|axios\.get|window\.location\.href\s*=|\.open)\s*\(\s*["\']([^"\']+)["\']',
-    re.IGNORECASE,
-)
-
-# Ekstraksi form
-_FORM_RE = re.compile(r'<form[^>]*>(.*?)</form>', re.IGNORECASE | re.DOTALL)
-_ACTION_RE = re.compile(r'action\s*=\s*["\']([^"\']*)["\']', re.IGNORECASE)
-_METHOD_RE = re.compile(r'method\s*=\s*["\']([^"\']*)["\']', re.IGNORECASE)
-_INPUT_NAME_RE = re.compile(
-    r'<(?:input|textarea|select)[^>]*name\s*=\s*["\']([^"\']+)["\']',
-    re.IGNORECASE,
-)
-
-# Ekstensi yang tidak perlu di-crawl
-_SKIP_EXTS = {
-    ".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".ico",
-    ".css", ".js", ".woff", ".woff2", ".ttf", ".eot",
-    ".pdf", ".zip", ".rar", ".tar", ".gz", ".mp4", ".mp3",
-    ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+# Ekstensi yang di-skip (aset statis)
+SKIP_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
+    ".css", ".woff", ".woff2", ".ttf", ".eot", ".otf",
+    ".mp3", ".mp4", ".avi", ".mov", ".zip", ".tar", ".gz",
+    ".pdf", ".doc", ".xls", ".ppt",
 }
 
+# Regex untuk ekstrak URL dari HTML
+HREF_RE = re.compile(r'href=["\']([^"\'#>]+)["\']', re.IGNORECASE)
+SRC_RE  = re.compile(r'src=["\']([^"\'#>]+)["\']', re.IGNORECASE)
+ACTION_RE = re.compile(r'action=["\']([^"\'#>]+)["\']', re.IGNORECASE)
 
-@dataclass
+# Form input regex
+INPUT_RE = re.compile(
+    r'<input[^>]+name=["\']([^"\']+)["\'][^>]*>',
+    re.IGNORECASE,
+)
+TEXTAREA_RE = re.compile(
+    r'<textarea[^>]+name=["\']([^"\']+)["\'][^>]*>',
+    re.IGNORECASE,
+)
+
+
 class CrawledURL:
-    """Satu halaman yang berhasil di-crawl."""
-    url: str
-    status: int
-    params: List[str] = field(default_factory=list)      # Query param names
-    forms: List[Dict] = field(default_factory=list)       # List of form dicts
-    depth: int = 0
-    content_type: str = ""
+    """Merepresentasikan satu URL yang berhasil di-crawl beserta metadata-nya."""
 
-    @property
-    def has_params(self) -> bool:
-        return bool(self.params)
+    def __init__(
+        self,
+        url: str,
+        status: int,
+        content_type: str,
+        depth: int,
+        forms: List[Dict],
+        params: Dict[str, str],
+        response: Optional[HTTPResponse] = None,
+    ):
+        self.url = url
+        self.status = status
+        self.content_type = content_type
+        self.depth = depth
+        self.forms = forms          # [{"action": url, "method": "post", "inputs": [...]}]
+        self.params = params        # query parameter dari URL
+        self.response = response    # referensi response asli (opsional)
 
-    @property
-    def has_forms(self) -> bool:
-        return bool(self.forms)
+    def __repr__(self) -> str:
+        return f"<CrawledURL [{self.status}] {self.url} depth={self.depth}>"
 
 
-class Crawler:
+class WebCrawler:
     """
-    Web crawler async dengan penanganan robust untuk:
-    - Situs dengan WAF/Cloudflare (header browser-like)
-    - URL relatif dan absolut
-    - Form detection
-    - Link di dalam JS
-    - Redirect
+    Async web crawler.
+    Mengunjungi URL secara BFS hingga kedalaman tertentu,
+    mengekstrak link, form, dan parameter.
     """
 
     def __init__(self, config: ScanConfig, http: AsyncHTTPClient):
         self.config = config
         self.http = http
-        self._visited: Set[str] = set()
-        self._base_domain = urlparse(config.target_url).netloc
+        self.base_domain = urlparse(config.target_url).netloc
+        self.visited: Set[str] = set()
+        self.results: List[CrawledURL] = []
+        self._queue: asyncio.Queue = asyncio.Queue()
 
-    # ─── URL helpers ──────────────────────────────────────────────────────────
-
-    def _normalize(self, url: str, base: str) -> Optional[str]:
-        """Normalisasi URL relatif menjadi absolut, filter non-HTTP."""
+    def _normalize_url(self, url: str, base: str) -> Optional[str]:
+        """Normalisasi URL relatif ke absolut, filter non-scope."""
         try:
-            url = url.strip()
-
-            # Lewati URL kosong, fragment, javascript:, mailto:, dll
-            if not url or url.startswith(("#", "javascript:", "mailto:", "tel:", "data:")):
-                return None
-
-            # Resolve URL relatif ke absolut
-            resolved = urljoin(base, url)
-
-            parsed = urlparse(resolved)
+            full = urljoin(base, url.strip())
+            parsed = urlparse(full)
 
             # Hanya HTTP/HTTPS
             if parsed.scheme not in ("http", "https"):
                 return None
 
-            # Hanya domain yang sama (in-scope)
-            if parsed.netloc != self._base_domain:
+            # Hanya domain yang sama (scope)
+            if parsed.netloc != self.base_domain:
                 return None
 
-            # Lewati ekstensi file statis
-            path = parsed.path.lower()
-            if any(path.endswith(ext) for ext in _SKIP_EXTS):
+            # Lewati ekstensi statis
+            path_lower = parsed.path.lower()
+            if any(path_lower.endswith(ext) for ext in SKIP_EXTENSIONS):
                 return None
 
-            # Hapus fragment (#...) dari URL
+            # Hapus fragment, normalisasi
             clean = urlunparse((
-                parsed.scheme, parsed.netloc, parsed.path,
-                parsed.params, parsed.query, ""
+                parsed.scheme, parsed.netloc,
+                parsed.path, parsed.params, parsed.query, ""
             ))
             return clean
         except Exception:
             return None
 
     def _extract_links(self, html: str, base_url: str) -> Set[str]:
-        """Ekstrak semua link unik dari HTML dan JS inline."""
+        """Ekstrak semua link dari HTML."""
         links: Set[str] = set()
-
-        for raw in _HREF_RE.findall(html):
-            url = self._normalize(raw, base_url)
-            if url:
-                links.add(url)
-
-        for raw in _JS_URL_RE.findall(html):
-            url = self._normalize(raw, base_url)
-            if url:
-                links.add(url)
-
+        for pattern in (HREF_RE, SRC_RE, ACTION_RE):
+            for match in pattern.finditer(html):
+                url = self._normalize_url(match.group(1), base_url)
+                if url:
+                    links.add(url)
         return links
 
-    def _extract_params(self, url: str) -> List[str]:
-        """Ekstrak nama-nama query parameter dari URL."""
-        parsed = urlparse(url)
-        qs = parse_qs(parsed.query, keep_blank_values=True)
-        return list(qs.keys())
-
     def _extract_forms(self, html: str, base_url: str) -> List[Dict]:
-        """Ekstrak semua form beserta action, method, dan input names."""
+        """Ekstrak semua form beserta action, method, dan input fields."""
         forms = []
-        for form_html in _FORM_RE.findall(html):
-            action_m = _ACTION_RE.search(form_html)
-            method_m = _METHOD_RE.search(form_html)
+        form_blocks = re.findall(r'<form[^>]*>(.*?)</form>', html, re.IGNORECASE | re.DOTALL)
+        form_headers = re.findall(r'<form([^>]*)>', html, re.IGNORECASE)
 
-            raw_action = action_m.group(1) if action_m else base_url
-            action = self._normalize(raw_action, base_url) or base_url
-            method = (method_m.group(1) if method_m else "GET").upper()
+        for i, (header, body) in enumerate(zip(form_headers, form_blocks)):
+            action_m = re.search(r'action=["\']([^"\']+)["\']', header, re.IGNORECASE)
+            method_m = re.search(r'method=["\']([^"\']+)["\']', header, re.IGNORECASE)
 
-            inputs = _INPUT_NAME_RE.findall(form_html)
-            if inputs:
-                forms.append({
-                    "action": action,
-                    "method": method,
-                    "inputs": inputs,
-                })
+            action = self._normalize_url(action_m.group(1), base_url) if action_m else base_url
+            method = method_m.group(1).upper() if method_m else "GET"
+
+            inputs = INPUT_RE.findall(body) + TEXTAREA_RE.findall(body)
+            forms.append({
+                "action": action or base_url,
+                "method": method,
+                "inputs": inputs,
+            })
+
         return forms
 
-    # ─── Core crawl ───────────────────────────────────────────────────────────
+    def _extract_params(self, url: str) -> Dict[str, str]:
+        """Ekstrak query parameter dari URL."""
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        return {k: v[0] for k, v in qs.items()}
 
-    async def _crawl_one(self, url: str, depth: int) -> Optional[CrawledURL]:
-        """Crawl satu URL, kembalikan CrawledURL atau None jika gagal."""
-        if url in self._visited:
+    async def _fetch_sitemap(self) -> Set[str]:
+        """Coba ambil sitemap.xml untuk mendapatkan daftar URL."""
+        urls: Set[str] = set()
+        sitemap_urls = [
+            f"{self.config.target_url.rstrip('/')}/sitemap.xml",
+            f"{self.config.target_url.rstrip('/')}/sitemap_index.xml",
+        ]
+        for sm_url in sitemap_urls:
+            resp = await self.http.get(sm_url)
+            if resp.ok and "<url>" in resp.text.lower():
+                loc_matches = re.findall(r'<loc>(.*?)</loc>', resp.text, re.IGNORECASE)
+                for loc in loc_matches:
+                    norm = self._normalize_url(loc, sm_url)
+                    if norm:
+                        urls.add(norm)
+                logger.info("Sitemap ditemukan, %d URL terindeks.", len(urls))
+        return urls
+
+    async def _process_url(self, url: str, depth: int) -> Optional[CrawledURL]:
+        """Fetch satu URL dan ekstrak data."""
+        if url in self.visited:
             return None
-        self._visited.add(url)
-
-        logger.debug("Crawling [depth=%d]: %s", depth, url)
+        self.visited.add(url)
 
         resp = await self.http.get(url)
-
-        if resp.error:
-            logger.debug("Error crawling %s: %s", url, resp.error)
+        if not resp.ok:
             return None
 
-        # Lewati response non-HTML
         content_type = resp.header("Content-Type", "")
-        if resp.status not in range(200, 400):
-            # Tetap proses 200-399 (termasuk redirect yang sudah di-follow)
-            logger.debug("Status %d untuk %s", resp.status, url)
-            if resp.status >= 400:
-                return None
+        forms = []
+        links: Set[str] = set()
 
-        params = self._extract_params(resp.url)  # URL final setelah redirect
-        forms = self._extract_forms(resp.text, resp.url)
+        if "text/html" in content_type:
+            links = self._extract_links(resp.text, url)
+            forms = self._extract_forms(resp.text, url)
+
+        params = self._extract_params(url)
 
         crawled = CrawledURL(
-            url=resp.url,  # URL setelah redirect
+            url=url,
             status=resp.status,
-            params=params,
-            forms=forms,
-            depth=depth,
             content_type=content_type,
+            depth=depth,
+            forms=forms,
+            params=params,
+            response=resp,
         )
 
-        # Tambahkan URL asli sebagai sudah dikunjungi (untuk redirect)
-        self._visited.add(resp.url)
+        # Tambah link baru ke queue
+        if depth < self.config.crawl_depth:
+            for link in links:
+                if link not in self.visited:
+                    await self._queue.put((link, depth + 1))
 
-        return crawled, self._extract_links(resp.text, resp.url)
+        return crawled
 
     async def crawl(self) -> List[CrawledURL]:
         """
         Mulai crawl dari target URL.
-        Return: list CrawledURL yang berhasil dikunjungi.
+        Kembalikan list CrawledURL yang berhasil di-crawl.
         """
-        target = self.config.target_url
-        max_depth = self.config.crawl_depth
-        results: List[CrawledURL] = []
+        logger.info("Memulai crawl: %s (depth=%d)", self.config.target_url, self.config.crawl_depth)
 
-        # Queue: (url, depth)
-        queue: List[tuple] = [(target, 0)]
+        # Ambil sitemap lebih dulu
+        sitemap_urls = await self._fetch_sitemap()
+        await self._queue.put((self.config.target_url, 0))
+        for su in sitemap_urls:
+            await self._queue.put((su, 1))
 
-        while queue:
-            # Ambil batch berdasarkan depth yang sama
-            current_depth = queue[0][1]
-            batch = []
-            remaining = []
+        workers_done = False
+        tasks: List[asyncio.Task] = []
 
-            for item in queue:
-                if item[1] == current_depth:
-                    batch.append(item)
-                else:
-                    remaining.append(item)
+        while not self._queue.empty() or tasks:
+            # Batasi jumlah URL
+            if len(self.visited) >= self.config.max_urls_per_domain:
+                logger.info("Batas URL tercapai (%d).", self.config.max_urls_per_domain)
+                break
 
-            queue = remaining
+            # Jalankan workers sampai batas thread
+            while not self._queue.empty() and len(tasks) < self.config.max_threads:
+                url, depth = await self._queue.get()
+                if url not in self.visited:
+                    task = asyncio.create_task(self._process_url(url, depth))
+                    tasks.append(task)
 
-            # Crawl batch secara concurrent (max 5 sekaligus)
-            semaphore = asyncio.Semaphore(5)
+            if not tasks:
+                break
 
-            async def crawl_with_sem(url: str, depth: int):
-                async with semaphore:
-                    return await self._crawl_one(url, depth)
+            # Tunggu setidaknya satu selesai
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            tasks = list(pending)
 
-            tasks = [crawl_with_sem(url, depth) for url, depth in batch]
-            task_results = await asyncio.gather(*tasks, return_exceptions=True)
+            for task in done:
+                try:
+                    result = task.result()
+                    if result:
+                        self.results.append(result)
+                        logger.debug("Crawled: %s", result.url)
+                except Exception as exc:
+                    logger.debug("Crawl error: %s", exc)
 
-            for result in task_results:
-                if isinstance(result, Exception) or result is None:
-                    continue
-
-                crawled_url, links = result
-                results.append(crawled_url)
-
-                # Tambah link ke queue jika belum mencapai max depth
-                if current_depth < max_depth:
-                    for link in links:
-                        if link not in self._visited:
-                            queue.append((link, current_depth + 1))
+        # Tunggu sisa task
+        if tasks:
+            done = await asyncio.gather(*tasks, return_exceptions=True)
+            for r in done:
+                if isinstance(r, CrawledURL) and r:
+                    self.results.append(r)
 
         logger.info(
-            "Crawl selesai: %d URL ditemukan dari %s (depth=%d)",
-            len(results), target, max_depth,
+            "Crawl selesai: %d URL ditemukan dari %d dikunjungi.",
+            len(self.results), len(self.visited),
         )
-        return results
+        return self.results

@@ -352,27 +352,6 @@ async def _check_sensitive_file(
     return findings
 
 
-
-async def _analyze_page_content(
-    http: AsyncHTTPClient,
-    url: str,
-) -> List[Finding]:
-    """Re-fetch halaman untuk analisis konten sensitif."""
-    findings = []
-    try:
-        resp = await http.get(url)
-        if resp.error or not resp.text:
-            return []
-        body = resp.text
-        headers = resp.headers
-        findings.extend(_check_sensitive_content(body, url))
-        findings.extend(_check_error_leaks(body, url))
-        findings.extend(_fingerprint_technology(body, headers, url))
-    except Exception as exc:
-        logger.debug("Analisis konten gagal untuk %s: %s", url, exc)
-    return findings
-
-
 async def scan(
     config: ScanConfig,
     http: AsyncHTTPClient,
@@ -398,8 +377,18 @@ async def scan(
             for path in all_paths:
                 tasks.append(_check_sensitive_file(http, page.url, path))
 
-        # Periksa konten halaman yang sudah di-crawl (re-fetch)
-        tasks.append(_analyze_page_content(http, page.url))
+        # Periksa konten halaman yang sudah di-crawl
+        if page.response:
+            body = page.response.text
+            headers = page.response.headers
+
+            content_findings = _check_sensitive_content(body, page.url)
+            error_findings   = _check_error_leaks(body, page.url)
+            tech_findings    = _fingerprint_technology(body, headers, page.url)
+
+            findings.extend(content_findings)
+            findings.extend(error_findings)
+            findings.extend(tech_findings)
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for r in results:
